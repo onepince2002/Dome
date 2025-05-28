@@ -1,3 +1,3 @@
 # Dome Test
 
-![image](https://github.com/user-attachments/assets/5d6090b6-90ce-4618-92bf-c0a7a5646ef9)
+![image](https://github.com/user-attachments/assets/84af5b24-6339-4de8-87c2-c15807eb12c4)
