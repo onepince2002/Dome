@@ -62,7 +62,7 @@ Hello from test.js!
 
 ### index.html
 - **標題**：「你好，GitHub」
-- **內容**：顯示「什麽都沒有」
+- **內容**：顯示「什麼都沒有」
 - **功能**：頁面載入時會彈出 alert(1) 提示
 
 ### test.js
