@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>自行車生物力學分析器 (支援多檔案對比)</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/fit-parser/dist/fit-parser.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7f6; color: #333; padding: 20px; max-width: 1100px; margin: auto; }
+        .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        h1 { font-size: 24px; color: #2c3e50; margin-top: 0; }
+        .controls { display: flex; gap: 15px; align-items: center; flex-wrap: wrap; }
+        select, input[type="file"], button { padding: 10px; border-radius: 5px; border: 1px solid #ccc; font-size: 16px; }
+        button { background-color: #3498db; color: white; border: none; cursor: pointer; transition: background 0.3s; }
+        button:hover { background-color: #2980b9; }
+        button:disabled { background-color: #bdc3c7; cursor: not-allowed; }
+        #chartContainer { position: relative; height: 60vh; width: 100%; }
+        .stats-container { margin-top: 15px; display: flex; flex-direction: column; gap: 10px; }
+        .stat-item { padding: 10px; background-color: #f8f9fa; border-left: 5px solid; border-radius: 4px; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h1>🚴‍♂️ 踩踏力學分析器 (多檔案對比版)</h1>
+    <p>💡 提示：您可以按住 Ctrl 或 Command 鍵，一次選擇多個 TCX 或 FIT 檔案進行對比。</p>
+    <div class="controls">
+        <input type="file" id="fileInput" accept=".tcx, .fit" multiple>
+        <select id="crankLength">
+            <option value="160">預設曲柄長度: 160 mm</option>
+            <option value="162.5" selected>預設曲柄長度: 162.5 mm</option>
+            <option value="165">預設曲柄長度: 165 mm</option>
+            <option value="170">預設曲柄長度: 170 mm</option>
+        </select>
+        <button id="analyzeBtn" onclick="processData()">分析所有資料</button>
+    </div>
+    <div class="stats-container" id="statsOutput"></div>
+</div>
+
+<div class="card">
+    <div id="chartContainer">
+        <canvas id="myChart"></canvas>
+    </div>
+</div>
+
+<script>
+    // 儲存所有已解析的檔案資料 [{ name: 'A.tcx', data: [...] }, { name: 'B.fit', data: [...] }]
+    let parsedFiles = []; 
+    let myChart = null;
+
+    // 定義多組顏色供多檔案繪圖使用 (紅、藍、綠、紫、橘)
+    const colorPalette = [
+        { main: '#e74c3c', bg: 'rgba(231, 76, 60, 0.1)' },
+        { main: '#3498db', bg: 'rgba(52, 152, 219, 0.1)' },
+        { main: '#2ecc71', bg: 'rgba(46, 204, 113, 0.1)' },
+        { main: '#9b59b6', bg: 'rgba(155, 89, 182, 0.1)' },
+        { main: '#e67e22', bg: 'rgba(230, 126, 34, 0.1)' }
+    ];
+
+    // 監聽多檔案上傳
+    document.getElementById('fileInput').addEventListener('change', async function(e) {
+        const files = e.target.files;
+        if (files.length === 0) return;
+
+        parsedFiles = []; // 清空之前的資料
+        const analyzeBtn = document.getElementById('analyzeBtn');
+        analyzeBtn.disabled = true;
+        analyzeBtn.innerText = "解析中...";
+
+        let promises = [];
+
+        // 遍歷所有選取的檔案
+        for (let i = 0; i < files.length; i++) {
+            promises.push(readFileAsync(files[i]));
+        }
+
+        // 等待所有檔案解析完畢
+        await Promise.all(promises);
+
+        analyzeBtn.disabled = false;
+        analyzeBtn.innerText = "分析所有資料";
+        alert(`成功解析 ${parsedFiles.length} 個檔案！請點選「分析所有資料」開始繪圖。`);
+    });
+
+    // 將 FileReader 與 FitParser 包裝成 Promise，支援異步多檔讀取
+    function readFileAsync(file) {
+        return new Promise((resolve, reject) => {
+            const extension = file.name.split('.').pop().toLowerCase();
+            const reader = new FileReader();
+
+            reader.onload = function(e) {
+                if (extension === 'tcx') {
+                    const data = parseTCX(e.target.result);
+                    if (data.length > 0) parsedFiles.push({ name: file.name, data: data });
+                    resolve();
+                } else if (extension === 'fit') {
+                    parseFIT(e.target.result, file.name, resolve);
+                } else {
+                    resolve(); // 忽略不支援的檔案
+                }
+            };
+
+            if (extension === 'tcx') reader.readAsText(file);
+            else if (extension === 'fit') reader.readAsArrayBuffer(file);
+            else resolve();
+        });
+    }
+
+    // 解析 TCX 並回傳 Array
+    function parseTCX(xmlString) {
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(xmlString, "text/xml");
+        const trackpoints = xmlDoc.getElementsByTagName("Trackpoint");
+        
+        let fileData = [];
+        for (let i = 0; i < trackpoints.length; i++) {
+            const tp = trackpoints[i];
+            const cadenceNode = tp.getElementsByTagName("Cadence")[0];
+            let cadence = cadenceNode ? parseFloat(cadenceNode.textContent) : 0;
+
+            let watts = 0;
+            const extensions = tp.getElementsByTagName("Extensions")[0];
+            if (extensions) {
+                const wattsNode = extensions.getElementsByTagNameNS("*", "Watts")[0];
+                if (wattsNode) watts = parseFloat(wattsNode.textContent);
+            }
+
+            if (cadence > 0 && watts > 0) fileData.push({ cadence: cadence, power: watts });
+        }
+        return fileData;
+    }
+
+    // 解析 FIT 並執行 Callback
+    function parseFIT(arrayBuffer, fileName, callback) {
+        const fitParser = new window.FitParser({
+            force: true, speedUnit: 'km/h', lengthUnit: 'km', temperatureUnit: 'celcius', elapsedRecordField: true, mode: 'cascade'
+        });
+
+        fitParser.parse(arrayBuffer, function (error, data) {
+            if (!error && data && data.records) {
+                let fileData = [];
+                data.records.forEach(record => {
+                    const cadence = record.cadence || 0;
+                    const power = record.power || 0;
+                    if (cadence > 0 && power > 0) {
+                        fileData.push({ cadence: cadence, power: power });
+                    }
+                });
+                if (fileData.length > 0) parsedFiles.push({ name: fileName, data: fileData });
+            }
+            callback(); // 無論成功失敗都結束 Promise
+        });
+    }
+
+    // 主處理邏輯：遍歷多檔案並繪圖
+    function processData() {
+        if (parsedFiles.length === 0) {
+            alert("請先上傳檔案並等待解析完成！");
+            return;
+        }
+
+        const crankL = parseFloat(document.getElementById('crankLength').value) / 1000;
+        
+        // 準備 Chart.js 所需的 Labels (X軸：迴轉速 40~140)
+        let chartLabels = [];
+        for (let cad = 40; cad <= 140; cad++) chartLabels.push(cad);
+
+        let datasets = [];
+        let statsContainer = document.getElementById('statsOutput');
+        statsContainer.innerHTML = ''; // 清空舊的統計數據
+
+        // 針對每個檔案進行運算
+        parsedFiles.forEach((fileObj, index) => {
+            let rawData = fileObj.data;
+            const color = colorPalette[index % colorPalette.length]; // 循環取色
+
+            // 1. 延遲校正 (功率前移 1 秒)
+            let alignedData = [];
+            for (let i = 0; i < rawData.length - 1; i++) {
+                alignedData.push({ cadence: rawData[i].cadence, power: rawData[i+1].power });
+            }
+
+            // 2. 篩選高輸出區間
+            let effortData = alignedData.filter(d => d.power > 150 && d.cadence > 40);
+            
+            effortData.forEach(d => {
+                const omega = d.cadence * (2 * Math.PI / 60);
+                d.force = d.power / (omega * crankL);
+            });
+
+            // 3. 最小平方法 (Linear Regression)
+            let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+            const n = effortData.length;
+            if(n === 0) return; // 防呆處理
+
+            effortData.forEach(d => {
+                sumX += d.cadence;
+                sumY += d.force;
+                sumXY += (d.cadence * d.force);
+                sumX2 += (d.cadence * d.cadence);
+            });
+            
+            const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+            const intercept = (sumY - slope * sumX) / n;
+
+            // 4. 計算曲線資料
+            let forceLine = [];
+            let powerCurve = [];
+            let maxPower = 0;
+            let optimalCadence = 0;
+
+            chartLabels.forEach(cad => {
+                let f = slope * cad + intercept;
+                if (f < 0) f = 0;
+                forceLine.push(f);
+                
+                let omega = cad * (2 * Math.PI / 60);
+                let p = f * omega * crankL;
+                powerCurve.push(p);
+
+                if (p > maxPower) {
+                    maxPower = p;
+                    optimalCadence = cad;
+                }
+            });
+
+            // 加入 Chart.js 的 Dataset
+            // F-V 實線
+            datasets.push({
+                label: `${fileObj.name} (F-V 力量)`,
+                data: forceLine,
+                borderColor: color.main,
+                backgroundColor: color.bg,
+                yAxisID: 'y',
+                fill: false,
+                tension: 0.1
+            });
+            
+            // P-V 虛線
+            datasets.push({
+                label: `${fileObj.name} (P-V 功率)`,
+                data: powerCurve,
+                borderColor: color.main,
+                backgroundColor: color.bg,
+                borderDash: [5, 5], // 虛線
+                yAxisID: 'y1',
+                fill: true,
+                tension: 0.4
+            });
+
+            // 新增該檔案的統計資訊到介面
+            const statHtml = `
+                <div class="stat-item" style="border-left-color: ${color.main}; color: ${color.main};">
+                    📁 檔案：${fileObj.name} <br>
+                    ⚡ 理論最大功率：${Math.round(maxPower)}W ｜ 🎯 最佳發力甜蜜點：${optimalCadence} rpm
+                </div>
+            `;
+            statsContainer.innerHTML += statHtml;
+        });
+
+        // 畫圖
+        drawChart(chartLabels, datasets);
+    }
+
+    // 繪製多組資料圖表
+    function drawChart(labels, datasets) {
+        const ctx = document.getElementById('myChart').getContext('2d');
+        if (myChart) myChart.destroy();
+
+        myChart = new Chart(ctx, {
+            type: 'line',
+            data: { labels: labels, datasets: datasets },
+            options: {
+                responsive: true, 
+                maintainAspectRatio: false, 
+                interaction: { mode: 'index', intersect: false },
+                plugins: {
+                    tooltip: { mode: 'index', intersect: false }
+                },
+                scales: {
+                    x: { title: { display: true, text: '迴轉速 Cadence (rpm)', font: {size: 14} } },
+                    y: { type: 'linear', position: 'left', title: { display: true, text: '切線力量 (N)', font: {size: 14} }, min: 0 },
+                    y1: { type: 'linear', position: 'right', title: { display: true, text: '功率 (W)', font: {size: 14} }, grid: { drawOnChartArea: false }, min: 0 }
+                }
+            }
+        });
+    }
+</script>
+
+</body>
+</html>
